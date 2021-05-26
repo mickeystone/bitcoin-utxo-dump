@@ -1,5 +1,5 @@
 
-# use channel to concurrently decode data. but something is wrong in the code, don't know why !!!
+# use channel to concurrently decode data. 
 
 
 
