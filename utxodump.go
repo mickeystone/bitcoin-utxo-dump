@@ -2,19 +2,19 @@ package main
 
 // local packages
 import (
-    "github.com/in3rsha/bitcoin-utxo-dump/bitcoin/btcleveldb"
+    "bitcoin-utxo-dump/bitcoin/btcleveldb"
     "github.com/panjf2000/ants"
     "sync"
 )                                         // chainstate leveldb decoding functions
-import "github.com/in3rsha/bitcoin-utxo-dump/bitcoin/keys"   // bitcoin addresses
-import "github.com/in3rsha/bitcoin-utxo-dump/bitcoin/bech32" // segwit bitcoin addresses
+import "bitcoin-utxo-dump/bitcoin/keys"   // bitcoin addresses
+import "bitcoin-utxo-dump/bitcoin/bech32" // segwit bitcoin addresses
 
 import "github.com/syndtr/goleveldb/leveldb" // go get github.com/syndtr/goleveldb/leveldb
 import "github.com/syndtr/goleveldb/leveldb/opt" // set no compression when opening leveldb
 import "flag"         // command line arguments
 import "fmt"
 import "os"           // open file for writing
-
+// execute shell command (check bitcoin isn't running)
 import "os/signal"    // catch interrupt signals CTRL-C to close db connection safely
 import "syscall"      // catch kill commands too
 import "bufio"        // bulk writing to file
@@ -26,11 +26,11 @@ import "runtime"      // Check OS type for file-handler limitations
 func parse(i interface{}){
     var output = map[string]string{}
 
-    utxo := i.(map[string][]byte)
+    utxo := i.(DBdata)
 
-    key := utxo["key"]
-    value := utxo["value"]
-    obfuscateKey := utxo["obfuscateKey"]
+    key := utxo.key
+    value := utxo.value
+    obfuscateKey := utxo.obfuscateKey
     // first byte in key indicates the type of key we've got for leveldb
     prefix := key[0]
 
@@ -310,7 +310,7 @@ func parse(i interface{}){
 
                 // Non-Standard (if the script type hasn't been identified and set then it remains as an unknown "non-standard" script)
                 if scriptType == "non-standard" {
-                    //scriptTypeCount["non-standard"] += 1
+                    //scriptTypeCount["non-standard"] +=Processing 1
                 }
 
                 // add address and script type to results map
@@ -366,7 +366,7 @@ func logtofile()  {
         fmt.Fprintln(writer, csvline)
         total += 1
     }
-
+    logexitchan <- struct{}{}
 }
 
 
@@ -401,9 +401,9 @@ func generate(wg *sync.WaitGroup){
         dstvalue := make([]byte, len(value))
         copy(dstkey, key)
         copy(dstvalue, value)
-        
+
         // first byte in key indicates the type of key we've got for leveldb
-        prefix := key[0]
+        prefix := dstkey[0]
         if (prefix == 14) { // 14 = obfuscateKey
             obfuscateKey = dstvalue
         }
@@ -411,7 +411,7 @@ func generate(wg *sync.WaitGroup){
         if (prefix == 67) {
             dstobfuscateKey := make([]byte, len(obfuscateKey))
             copy(dstobfuscateKey, obfuscateKey)
-            
+
             temp := DBdata{dstkey, dstvalue, dstobfuscateKey}
             dbchan <- temp
         }
@@ -427,7 +427,9 @@ type DBdata struct {
     key []byte
     value []byte
     obfuscateKey []byte
+
 }
+
 
 var fieldsAllowed = []string{"count", "txid", "vout", "height", "coinbase", "amount", "nsize", "script", "type", "address"}
 
@@ -444,8 +446,10 @@ var fields = ""
 var file = ""
 var chainstate = ""
 
-var dbchan = make(chan DBdata, 100)
+//var dbchan = make(chan *DBdata, 100)
+var dbchan = make(chan DBdata, 3)
 var csvchan = make(chan map[string]string, 100)
+var logexitchan = make(chan struct{}, 1)
 
 func main() {
 
@@ -462,7 +466,15 @@ func main() {
         os.Exit(0)     // exit
     }()
 
-
+    if runtime.GOOS == "darwin" {
+        cmd2 := exec.Command("ulimit", "-n", "4096")
+        fmt.Println("setting ulimit 4096\n")
+        _, err2 := cmd2.Output()
+        if err2 != nil {
+            fmt.Println("setting new ulimit failed with 4096\n")
+        }
+        defer exec.Command("ulimit", "-n", "1024")
+    } 
     runtime.GOMAXPROCS(runtime.NumCPU())
     wg := sync.WaitGroup{}
 
@@ -474,10 +486,10 @@ func main() {
     // Command Line Options (Flags)
     chainstate0 := flag.String("db", defaultfolder, "Location of bitcoin chainstate db.") // chainstate folder
     file0 := flag.String("o", defaultfile, "Name of file to dump utxo list to.") // output file
-    fields0 := flag.String("f", "count,txid,address", "Fields to include in output. [count,txid,vout,height,amount,coinbase,nsize,script,type,address]")
+    fields0 := flag.String("f", "count,txid,type,address,height", "Fields to include in output. [count,txid,vout,height,amount,coinbase,nsize,script,type,address]")
     testnetflag := flag.Bool("testnet", false, "Is the chainstate leveldb for testnet?") // true/false
-    verbose0 := flag.Bool("v", false, "Print utxos as we process them (will be about 3 times slower with this though).")
-    p2pkaddresses0 := flag.Bool("p2pkaddresses", false, "Convert public keys in P2PK locking scripts to addresses also.") // true/false
+    verbose0 := flag.Bool("v", true, "Print utxos as we process them (will be about 3 times slower with this though).")
+    p2pkaddresses0 := flag.Bool("p2pkaddresses", true, "Convert public keys in P2PK locking scripts to addresses also.") // true/false
     flag.Parse() // execute command line parsing for all declared flags
 
     p2pkaddresses = *p2pkaddresses0
@@ -538,6 +550,7 @@ func main() {
     wg.Add(1)
     go generate(&wg)
 
+    //wg.Add(1)
     go logtofile()
 
     pool, _ := ants.NewPoolWithFunc(20, func(i interface{}) {
@@ -548,7 +561,12 @@ func main() {
     defer pool.Release()
 
     // something is wrong here:  utx from dbchan are repeated ???
-    for utx := range dbchan {
+    for {
+        utx, closed := <- dbchan
+        if !closed{
+
+            break
+        }
         wg.Add(1)
         _ = pool.Invoke(utx)
     }
@@ -556,10 +574,10 @@ func main() {
     wg.Wait()
     close(csvchan)
 
+    <- logexitchan
+
     // ----------------------------------------------------------------------------------------------------
     // ----------------------------------------------------------------------------------------------------
-
-
     fmt.Println()
 
     // Can only show script type stats if we have requested to get the script type for each entry with the -f fields flag
