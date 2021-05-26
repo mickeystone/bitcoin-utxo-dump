@@ -397,25 +397,24 @@ func generate(wg *sync.WaitGroup){
     for iter.Next() {
         key := iter.Key()
         value := iter.Value()
-
+        dstkey := make([]byte, len(key))
+        dstvalue := make([]byte, len(value))
+        copy(dstkey, key)
+        copy(dstvalue, value)
+        
         // first byte in key indicates the type of key we've got for leveldb
         prefix := key[0]
-
         if (prefix == 14) { // 14 = obfuscateKey
-            obfuscateKey = value
+            obfuscateKey = dstvalue
         }
+
         if (prefix == 67) {
-            DBdata2 := make(map[string][]byte)
-            DBdata2["key"] = key
-            DBdata2["value"] = value
-            DBdata2["obfuscateKey"] = obfuscateKey
-            //var DBdata2 = map[string][]byte{"key":key, "value": value, "obfuscateKey": obfuscateKey}
-            //utx := &DBdata{key, value, obfuscateKey}
-            dbchan <- DBdata2
-
-            //fmt.Println(hex.EncodeToString(key), hex.EncodeToString(value))
+            dstobfuscateKey := make([]byte, len(obfuscateKey))
+            copy(dstobfuscateKey, obfuscateKey)
+            
+            temp := DBdata{dstkey, dstvalue, dstobfuscateKey}
+            dbchan <- temp
         }
-
     }
     close(dbchan)
     iter.Release() // Do not defer this, want to release iterator before closing database
@@ -428,9 +427,7 @@ type DBdata struct {
     key []byte
     value []byte
     obfuscateKey []byte
-
 }
-
 
 var fieldsAllowed = []string{"count", "txid", "vout", "height", "coinbase", "amount", "nsize", "script", "type", "address"}
 
@@ -447,12 +444,8 @@ var fields = ""
 var file = ""
 var chainstate = ""
 
-//var dbchan = make(chan *DBdata, 100)
-var dbchan = make(chan map[string][]byte, 3)
+var dbchan = make(chan DBdata, 100)
 var csvchan = make(chan map[string]string, 100)
-
-var dbchan2 = make(chan string, 5)
-
 
 func main() {
 
